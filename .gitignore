@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+data/state.db
+data/state.db-shm
+data/state.db-wal
+data/follow.log
+data/check.log
