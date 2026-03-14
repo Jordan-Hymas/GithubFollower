@@ -1,6 +1,6 @@
 # GitHub Follower
 
-Automated GitHub account growth tool. Follows targeted developers with very few followers (5–10), detects who follows back, then unfollows them — keeping your following count low while growing your followers over time.
+Automated GitHub account growth tool. Follows targeted developers with very few followers (5–10), detects who follows back, then unfollows them, keeping your following count low while growing your followers over time.
 
 Runs as a persistent background daemon on a Linux server. No manual intervention required after initial setup.
 
