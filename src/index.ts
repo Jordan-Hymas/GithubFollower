@@ -1,6 +1,9 @@
 import { parseArgs } from 'util';
 import { config } from './config.ts';
-import { getDb, closeDb, getTodayStats, getAllStats, getTodayFollowCount, getActiveFollowing } from './db.ts';
+import {
+  getDb, closeDb, getTodayStats, getAllStats, getTodayFollowCount,
+  getActiveFollowing, getQueryStats,
+} from './db.ts';
 import { createClient } from './github.ts';
 import { log } from './logger.ts';
 import { runFollowSession } from './follow.ts';
@@ -38,6 +41,8 @@ async function main() {
       const today = getTodayStats(db);
       const totals = getAllStats(db);
       const active = getActiveFollowing(db);
+      const queryStats = getQueryStats(db);
+
       const followBackRate =
         totals.totalFollowedBack + totals.totalUnfollowed > 0
           ? (((totals.totalFollowedBack + totals.totalUnfollowed) /
@@ -58,6 +63,15 @@ async function main() {
       console.log(`Followed back:         ${totals.totalFollowedBack + totals.totalUnfollowed}`);
       console.log(`Never followed back:   ${totals.totalNeverFollowedBack}`);
       console.log(`Follow-back rate:      ${followBackRate}%`);
+
+      if (queryStats.length > 0) {
+        console.log('');
+        console.log('=== Per-Query Stats ===');
+        for (const q of queryStats) {
+          console.log(`  [${q.rate.toFixed(1)}%] ${q.followed_back}/${q.followed} — ${q.query}`);
+        }
+      }
+
       console.log('');
       break;
     }

@@ -9,7 +9,8 @@ import {
   recordNeverFollowedBack,
 } from './db.ts';
 import { randomDelay, waitForRateLimit } from './scheduler.ts';
-import { RateLimitError } from './github.ts';
+import { RateLimitError, UnprocessableError } from './github.ts';
+import { notifyCheckSession } from './notifications.ts';
 
 export async function runCheckbackSession(
   client: GitHubClient,
@@ -31,6 +32,12 @@ export async function runCheckbackSession(
   let neverFollowedBack = 0;
 
   for (const user of users) {
+    // Whitelist guard — never unfollow these users
+    if (config.whitelist.has(user.username.toLowerCase())) {
+      logger.info(`@${user.username} is whitelisted — skipping`);
+      continue;
+    }
+
     let followsBack: boolean;
     try {
       followsBack = await client.checkFollowsBack(config.githubUsername, user.username, db);
@@ -60,7 +67,9 @@ export async function runCheckbackSession(
         unfollowed++;
         logger.info(`Unfollowed @${user.username}`);
       } catch (err) {
-        if (err instanceof RateLimitError) {
+        if (err instanceof UnprocessableError) {
+          logger.warn(`Cannot unfollow @${user.username}: ${err.message}`);
+        } else if (err instanceof RateLimitError) {
           await waitForRateLimit(err.resetAt);
           try {
             await client.unfollowUser(user.username, db);
@@ -79,15 +88,18 @@ export async function runCheckbackSession(
       neverFollowedBack++;
       logger.info(`@${user.username} did not follow back`);
 
-      if (config.unfollowNonReciprocal) {
+      if (config.unfollowNonReciprocal && !config.whitelist.has(user.username.toLowerCase())) {
         logger.info(`Unfollowing non-reciprocal @${user.username}...`);
         try {
           await client.unfollowUser(user.username, db);
           recordUnfollowed(db, user.username);
           unfollowed++;
-          logger.info(`Unfollowed @${user.username}`);
         } catch (err) {
-          logger.error(`Failed to unfollow @${user.username}: ${err}`);
+          if (err instanceof UnprocessableError) {
+            logger.warn(`Cannot unfollow @${user.username}: ${err.message}`);
+          } else {
+            logger.error(`Failed to unfollow @${user.username}: ${err}`);
+          }
         }
       }
     }
@@ -98,4 +110,8 @@ export async function runCheckbackSession(
   logger.info(
     `Check session complete. Followed back: ${followedBack}, Unfollowed: ${unfollowed}, Never followed back: ${neverFollowedBack}`,
   );
+
+  if (config.discordWebhookUrl) {
+    await notifyCheckSession(config.discordWebhookUrl, followedBack, unfollowed, neverFollowedBack);
+  }
 }

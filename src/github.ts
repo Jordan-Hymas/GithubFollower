@@ -10,9 +10,25 @@ export class RateLimitError extends Error {
   }
 }
 
+export class UnprocessableError extends Error {
+  readonly status = 422;
+  constructor(username: string) {
+    super(`Cannot follow/unfollow @${username} (suspended, blocked, or invalid)`);
+    this.name = 'UnprocessableError';
+  }
+}
+
 export interface SearchResult {
   login: string;
   type: string;
+}
+
+export interface UserProfile {
+  login: string;
+  created_at: string;
+  bio: string | null;
+  followers: number;
+  following: number;
 }
 
 export interface RateLimitStatus {
@@ -21,12 +37,15 @@ export interface RateLimitStatus {
   resetAt: number;
 }
 
-function handleOctokitError(err: unknown): never {
+function handleOctokitError(err: unknown, username?: string): never {
   const e = err as { status?: number; response?: { headers?: { 'x-ratelimit-reset'?: string } } };
   if (e.status === 429 || e.status === 403) {
     const resetHeader = e.response?.headers?.['x-ratelimit-reset'];
     const resetAt = resetHeader ? parseInt(resetHeader, 10) * 1000 : Date.now() + 60_000;
     throw new RateLimitError(resetAt);
+  }
+  if (e.status === 422) {
+    throw new UnprocessableError(username ?? 'unknown');
   }
   throw err;
 }
@@ -44,12 +63,38 @@ export function createClient(config: Config) {
     }
   }
 
+  async function getFollowers(username: string, page: number, db: Database.Database): Promise<SearchResult[]> {
+    try {
+      const res = await octokit.users.listFollowersForUser({ username, per_page: 30, page });
+      incrementApiCall(db);
+      return res.data.map((u) => ({ login: u.login, type: 'User' }));
+    } catch (err) {
+      handleOctokitError(err, username);
+    }
+  }
+
+  async function getUserProfile(username: string, db: Database.Database): Promise<UserProfile> {
+    try {
+      const res = await octokit.users.getByUsername({ username });
+      incrementApiCall(db);
+      return {
+        login: res.data.login,
+        created_at: res.data.created_at,
+        bio: res.data.bio,
+        followers: res.data.followers,
+        following: res.data.following,
+      };
+    } catch (err) {
+      handleOctokitError(err, username);
+    }
+  }
+
   async function followUser(username: string, db: Database.Database): Promise<void> {
     try {
       await octokit.users.follow({ username });
       incrementApiCall(db);
     } catch (err) {
-      handleOctokitError(err);
+      handleOctokitError(err, username);
     }
   }
 
@@ -58,7 +103,7 @@ export function createClient(config: Config) {
       await octokit.users.unfollow({ username });
       incrementApiCall(db);
     } catch (err) {
-      handleOctokitError(err);
+      handleOctokitError(err, username);
     }
   }
 
@@ -87,7 +132,7 @@ export function createClient(config: Config) {
     };
   }
 
-  return { searchUsers, followUser, unfollowUser, checkFollowsBack, getRateLimitStatus };
+  return { searchUsers, getFollowers, getUserProfile, followUser, unfollowUser, checkFollowsBack, getRateLimitStatus };
 }
 
 export type GitHubClient = ReturnType<typeof createClient>;

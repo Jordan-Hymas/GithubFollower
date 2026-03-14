@@ -2,10 +2,11 @@ import type { Config } from './config.ts';
 import type { GitHubClient } from './github.ts';
 import type Database from 'better-sqlite3';
 import type { Logger } from './logger.ts';
-import { recordFollowed, getTodayFollowCount, getActiveFollowing } from './db.ts';
+import { recordFollowed, recordQueryFollow, getTodayFollowCount, getActiveFollowing } from './db.ts';
 import { discoverUsers } from './discovery.ts';
 import { checkDailyLimit, randomDelay, waitForRateLimit } from './scheduler.ts';
-import { RateLimitError } from './github.ts';
+import { RateLimitError, UnprocessableError } from './github.ts';
+import { notifyFollowSession } from './notifications.ts';
 
 export async function runFollowSession(
   client: GitHubClient,
@@ -13,9 +14,7 @@ export async function runFollowSession(
   config: Config,
   logger: Logger,
 ): Promise<void> {
-  if (!checkDailyLimit(db, config)) {
-    return;
-  }
+  if (!checkDailyLimit(db, config)) return;
 
   const active = getActiveFollowing(db);
   if (active.length >= config.maxFollowingTotal) {
@@ -27,7 +26,7 @@ export async function runFollowSession(
 
   let followed = 0;
 
-  for await (const username of discoverUsers(client, db, config)) {
+  for await (const { username, sourceQuery } of discoverUsers(client, db, config)) {
     if (!checkDailyLimit(db, config)) break;
 
     const currentActive = getActiveFollowing(db);
@@ -36,17 +35,24 @@ export async function runFollowSession(
       break;
     }
 
-    logger.info(`Following @${username}...`);
+    logger.info(`Following @${username} [${sourceQuery}]...`);
 
     try {
       await client.followUser(username, db);
     } catch (err) {
+      if (err instanceof UnprocessableError) {
+        logger.warn(`Skipping @${username}: ${err.message}`);
+        continue;
+      }
       if (err instanceof RateLimitError) {
         await waitForRateLimit(err.resetAt);
-        // retry once
         try {
           await client.followUser(username, db);
-        } catch {
+        } catch (retryErr) {
+          if (retryErr instanceof UnprocessableError) {
+            logger.warn(`Skipping @${username}: ${(retryErr as UnprocessableError).message}`);
+            continue;
+          }
           logger.error(`Failed to follow @${username} after rate limit retry. Stopping session.`);
           break;
         }
@@ -57,6 +63,7 @@ export async function runFollowSession(
     }
 
     recordFollowed(db, username);
+    recordQueryFollow(db, sourceQuery);
     followed++;
     logger.info(`Followed @${username} (${getTodayFollowCount(db)}/${config.dailyFollowMax} today)`);
 
@@ -66,4 +73,8 @@ export async function runFollowSession(
   }
 
   logger.info(`Follow session complete. Followed ${followed} users this session.`);
+
+  if (config.discordWebhookUrl && followed > 0) {
+    await notifyFollowSession(config.discordWebhookUrl, followed, getTodayFollowCount(db), config.dailyFollowMax);
+  }
 }

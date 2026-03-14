@@ -25,6 +25,13 @@ export interface DailyStats {
   api_calls: number;
 }
 
+export interface QueryStats {
+  query: string;
+  followed: number;
+  followed_back: number;
+  rate: number;
+}
+
 let _db: Database.Database | null = null;
 
 export function getDb(): Database.Database {
@@ -59,6 +66,12 @@ export function getDb(): Database.Database {
       discovered_at INTEGER NOT NULL,
       PRIMARY KEY (username, source_query)
     );
+
+    CREATE TABLE IF NOT EXISTS query_stats (
+      query         TEXT    PRIMARY KEY,
+      followed      INTEGER NOT NULL DEFAULT 0,
+      followed_back INTEGER NOT NULL DEFAULT 0
+    );
   `);
 
   return _db;
@@ -87,6 +100,17 @@ export function recordFollowBack(db: Database.Database, username: string): void 
     SET follows_back = 1, follow_back_checked_at = ?, status = 'followed_back'
     WHERE username = ?
   `).run(Date.now(), username);
+
+  // Update per-query analytics
+  const cached = db.prepare(
+    'SELECT source_query FROM discovery_cache WHERE username = ? LIMIT 1'
+  ).get(username) as { source_query: string } | undefined;
+  if (cached) {
+    db.prepare(`
+      INSERT INTO query_stats (query, followed, followed_back) VALUES (?, 0, 1)
+      ON CONFLICT(query) DO UPDATE SET followed_back = followed_back + 1
+    `).run(cached.source_query);
+  }
 }
 
 export function recordUnfollowed(db: Database.Database, username: string): void {
@@ -104,6 +128,13 @@ export function recordNeverFollowedBack(db: Database.Database, username: string)
     SET follow_back_checked_at = ?, status = 'never_followed_back'
     WHERE username = ?
   `).run(Date.now(), username);
+}
+
+export function recordQueryFollow(db: Database.Database, query: string): void {
+  db.prepare(`
+    INSERT INTO query_stats (query, followed, followed_back) VALUES (?, 1, 0)
+    ON CONFLICT(query) DO UPDATE SET followed = followed + 1
+  `).run(query);
 }
 
 export function wasEverFollowed(db: Database.Database, username: string): boolean {
@@ -128,6 +159,17 @@ export function getUsersToCheckBack(db: Database.Database, checkbackHours: numbe
   `).all(cutoff) as FollowedUser[];
 }
 
+export function getQueryStats(db: Database.Database): QueryStats[] {
+  return (db.prepare('SELECT * FROM query_stats ORDER BY followed DESC').all() as {
+    query: string;
+    followed: number;
+    followed_back: number;
+  }[]).map((r) => ({
+    ...r,
+    rate: r.followed > 0 ? (r.followed_back / r.followed) * 100 : 0,
+  }));
+}
+
 // --- daily_stats helpers ---
 
 function todayStr(): string {
@@ -135,9 +177,7 @@ function todayStr(): string {
 }
 
 function ensureTodayRow(db: Database.Database): void {
-  db.prepare(`
-    INSERT OR IGNORE INTO daily_stats (date) VALUES (?)
-  `).run(todayStr());
+  db.prepare('INSERT OR IGNORE INTO daily_stats (date) VALUES (?)').run(todayStr());
 }
 
 function incrementDailyStat(db: Database.Database, col: 'follows' | 'unfollows' | 'api_calls'): void {
@@ -168,10 +208,10 @@ export function getAllStats(db: Database.Database): {
 } {
   const row = db.prepare(`
     SELECT
-      SUM(CASE WHEN status = 'following' THEN 1 ELSE 0 END)              AS totalFollowing,
-      SUM(CASE WHEN status = 'followed_back' THEN 1 ELSE 0 END)          AS totalFollowedBack,
-      SUM(CASE WHEN status = 'unfollowed' THEN 1 ELSE 0 END)             AS totalUnfollowed,
-      SUM(CASE WHEN status = 'never_followed_back' THEN 1 ELSE 0 END)    AS totalNeverFollowedBack
+      SUM(CASE WHEN status = 'following' THEN 1 ELSE 0 END)           AS totalFollowing,
+      SUM(CASE WHEN status = 'followed_back' THEN 1 ELSE 0 END)       AS totalFollowedBack,
+      SUM(CASE WHEN status = 'unfollowed' THEN 1 ELSE 0 END)          AS totalUnfollowed,
+      SUM(CASE WHEN status = 'never_followed_back' THEN 1 ELSE 0 END) AS totalNeverFollowedBack
     FROM followed_users
   `).get() as { totalFollowing: number; totalFollowedBack: number; totalUnfollowed: number; totalNeverFollowedBack: number };
   return {
@@ -179,6 +219,34 @@ export function getAllStats(db: Database.Database): {
     totalFollowedBack: row.totalFollowedBack || 0,
     totalUnfollowed: row.totalUnfollowed || 0,
     totalNeverFollowedBack: row.totalNeverFollowedBack || 0,
+  };
+}
+
+export function getWeekStats(db: Database.Database): {
+  follows: number;
+  unfollows: number;
+  followedBack: number;
+  followBackRate: string;
+} {
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const daily = db.prepare(`
+    SELECT SUM(follows) AS follows, SUM(unfollows) AS unfollows
+    FROM daily_stats WHERE date >= ?
+  `).get(weekAgo) as { follows: number; unfollows: number };
+
+  const checked = db.prepare(`
+    SELECT COUNT(*) AS total,
+           SUM(CASE WHEN status IN ('followed_back','unfollowed') THEN 1 ELSE 0 END) AS fb
+    FROM followed_users
+    WHERE follow_back_checked_at >= ?
+  `).get(Date.now() - 7 * 24 * 60 * 60 * 1000) as { total: number; fb: number };
+
+  const rate = checked.total > 0 ? ((checked.fb / checked.total) * 100).toFixed(1) : '0.0';
+  return {
+    follows: daily.follows || 0,
+    unfollows: daily.unfollows || 0,
+    followedBack: checked.fb || 0,
+    followBackRate: rate,
   };
 }
 

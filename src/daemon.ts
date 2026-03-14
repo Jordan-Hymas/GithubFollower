@@ -1,33 +1,33 @@
 /**
  * Daemon mode — runs indefinitely until killed (SIGINT / SIGTERM).
  *
- * Schedule (all times local):
+ * Schedule (local time):
  *   09:00  — follow session
  *   10:00  — check session
  *   18:00  — check session
- *
- * Polls every 60 seconds to decide if a session is due.
- * Tracks which sessions already ran today to avoid double-runs.
+ *   Sunday 20:00 — weekly summary
  */
 
 import { config } from './config.ts';
-import { getDb, closeDb } from './db.ts';
+import { getDb, closeDb, getWeekStats } from './db.ts';
 import { createClient } from './github.ts';
 import { log } from './logger.ts';
 import { runFollowSession } from './follow.ts';
 import { runCheckbackSession } from './unfollow.ts';
+import { notifyWeeklySummary } from './notifications.ts';
 
-const FOLLOW_HOUR = 9;        // 09:00
-const CHECK_HOURS = [10, 18]; // 10:00 and 18:00
+const FOLLOW_HOUR = 9;
+const CHECK_HOURS = [10, 18];
+const WEEKLY_DAY = 0;   // Sunday
+const WEEKLY_HOUR = 20;
 const POLL_INTERVAL_MS = 60_000;
 
 function dateKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function currentHour(): number {
-  return new Date().getHours();
-}
+function currentHour(): number { return new Date().getHours(); }
+function currentDay(): number  { return new Date().getDay(); }
 
 async function main() {
   const db = getDb();
@@ -35,6 +35,7 @@ async function main() {
 
   let lastFollowDate = '';
   const lastCheckDates: Record<number, string> = {};
+  let lastWeeklyDate = '';
 
   function shutdown() {
     log.info('Daemon stopping...');
@@ -45,11 +46,12 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  log.info('Daemon started. Follow @ 09:00, Check @ 10:00 and 18:00.');
+  log.info('Daemon started. Follow @ 09:00 | Check @ 10:00 & 18:00 | Weekly summary Sundays @ 20:00');
 
   while (true) {
     const today = dateKey();
     const hour = currentHour();
+    const day = currentDay();
 
     // Follow session
     if (hour >= FOLLOW_HOUR && lastFollowDate !== today) {
@@ -66,6 +68,24 @@ async function main() {
         log.info(`=== Check session starting (${checkHour}:00 slot) ===`);
         await runCheckbackSession(client, db, config, log);
         log.info(`=== Check session done ===`);
+      }
+    }
+
+    // Weekly summary
+    if (day === WEEKLY_DAY && hour >= WEEKLY_HOUR && lastWeeklyDate !== today) {
+      lastWeeklyDate = today;
+      const stats = getWeekStats(db);
+      log.info(`=== Weekly Summary ===`);
+      log.info(`Follows: ${stats.follows} | Unfollows: ${stats.unfollows} | Followed back: ${stats.followedBack} | Rate: ${stats.followBackRate}%`);
+
+      if (config.discordWebhookUrl) {
+        await notifyWeeklySummary(
+          config.discordWebhookUrl,
+          stats.follows,
+          stats.unfollows,
+          stats.followedBack,
+          stats.followBackRate,
+        );
       }
     }
 

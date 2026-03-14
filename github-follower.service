@@ -1,0 +1,19 @@
+[Unit]
+Description=GitHub Follower Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=yeti
+WorkingDirectory=/home/yeti/GithubFollower
+EnvironmentFile=/home/yeti/GithubFollower/.env
+ExecStart=/usr/bin/node /home/yeti/GithubFollower/node_modules/.bin/tsx src/daemon.ts
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=github-follower
+
+[Install]
+WantedBy=multi-user.target
