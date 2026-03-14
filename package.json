@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "daemon": "tsx src/daemon.ts",
     "follow": "tsx src/index.ts follow",
     "check": "tsx src/index.ts check",
     "status": "tsx src/index.ts status"
